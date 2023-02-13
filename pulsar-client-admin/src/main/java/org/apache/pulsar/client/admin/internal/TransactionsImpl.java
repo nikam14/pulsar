@@ -166,6 +166,7 @@ public class TransactionsImpl extends BaseResource implements Transactions {
                         future.complete(metadata);
                     }
 
+
                     @Override
                     public void failed(Throwable throwable) {
                         future.completeExceptionally(getApiException(throwable.getCause()));
