@@ -72,6 +72,7 @@ public class ProxyPingTest extends ProducerConsumerBase {
         log.info("Proxy Server Started");
     }
 
+
     @AfterMethod(alwaysRun = true)
     protected void cleanup() throws Exception {
         super.internalCleanup();
