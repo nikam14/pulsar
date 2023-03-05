@@ -33,6 +33,7 @@ public class ClientConfigurationDataTest {
 
     @Test
     public void testDoNotPrintSensitiveInfo() throws JsonProcessingException {
+
         ClientConfigurationData clientConfigurationData = new ClientConfigurationData();
         clientConfigurationData.setTlsTrustStorePassword("xxxx");
         clientConfigurationData.setSocks5ProxyPassword("yyyy");
