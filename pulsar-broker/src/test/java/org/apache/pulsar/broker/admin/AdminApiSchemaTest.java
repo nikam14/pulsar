@@ -188,6 +188,32 @@ public class AdminApiSchemaTest extends MockedPulsarServiceBaseTest {
     }
 
     @Test(dataProvider = "version")
+    public void testSchemaCompatibilityStrategy(ApiVersion version) throws PulsarAdminException {
+        String namespace = format("%s%s%s", "schematest", (ApiVersion.V1.equals(version) ? "/" + cluster + "/" : "/"),
+                "test");
+        String topicName = "persistent://"+namespace + "/testStrategyChange";
+        SchemaInfo foo1SchemaInfo = Schema.AVRO(SchemaDefinition.builder()
+                .withAlwaysAllowNull(false)
+                .withPojo(Foo1.class).build())
+                .getSchemaInfo();
+
+        admin.schemas().createSchema(topicName, foo1SchemaInfo);
+        admin.namespaces().setSchemaAutoUpdateCompatibilityStrategy(namespace, SchemaAutoUpdateCompatibilityStrategy.Forward);
+        SchemaInfo fooSchemaInfo = Schema.AVRO(SchemaDefinition.builder()
+                .withAlwaysAllowNull(false)
+                .withPojo(Foo.class).build())
+                .getSchemaInfo();
+
+        try {
+            admin.schemas().createSchema(topicName, fooSchemaInfo);
+            fail("Should have failed");
+        } catch (PulsarAdminException.ConflictException e) {
+            assertTrue(e.getMessage().contains("HTTP 409"));
+        }
+
+    }
+
+    @Test(dataProvider = "version")
     public void testPostSchemaCompatibilityStrategy(ApiVersion version) throws PulsarAdminException {
         String namespace = format("%s%s%s", "schematest", (ApiVersion.V1.equals(version) ? "/" + cluster + "/" : "/"),
                 "test");
