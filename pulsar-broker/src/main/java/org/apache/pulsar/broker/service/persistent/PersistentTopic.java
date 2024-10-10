@@ -74,12 +74,14 @@ import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.ManagedCursor.IndividualDeletedEntries;
 import org.apache.bookkeeper.mledger.ManagedLedger;
+import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerAlreadyClosedException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerFencedException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerTerminatedException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.MetadataNotFoundException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.NonRecoverableLedgerException;
+import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.PositionBound;
 import org.apache.bookkeeper.mledger.PositionFactory;
@@ -1232,26 +1234,34 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                 .getTransactionPendingAckStoreSuffix(topic,
                         Codec.encode(subscriptionName)));
         if (brokerService.pulsar().getConfiguration().isTransactionCoordinatorEnabled()) {
-            getBrokerService().getManagedLedgerFactory().asyncDelete(tn.getPersistenceNamingEncoding(),
-                    getBrokerService().getManagedLedgerConfig(tn),
-                    new AsyncCallbacks.DeleteLedgerCallback() {
-                        @Override
-                        public void deleteLedgerComplete(Object ctx) {
-                            asyncDeleteCursorWithClearDelayedMessage(subscriptionName, unsubscribeFuture);
-                        }
-
-                        @Override
-                        public void deleteLedgerFailed(ManagedLedgerException exception, Object ctx) {
-                            if (exception instanceof MetadataNotFoundException) {
+            CompletableFuture<ManagedLedgerConfig> managedLedgerConfig = getBrokerService().getManagedLedgerConfig(tn);
+            managedLedgerConfig.thenAccept(config -> {
+                ManagedLedgerFactory managedLedgerFactory =
+                        getBrokerService().getManagedLedgerFactoryForTopic(tn, config.getStorageClassName());
+                managedLedgerFactory.asyncDelete(tn.getPersistenceNamingEncoding(),
+                        managedLedgerConfig,
+                        new AsyncCallbacks.DeleteLedgerCallback() {
+                            @Override
+                            public void deleteLedgerComplete(Object ctx) {
                                 asyncDeleteCursorWithClearDelayedMessage(subscriptionName, unsubscribeFuture);
-                                return;
                             }
 
-                            unsubscribeFuture.completeExceptionally(exception);
-                            log.error("[{}][{}] Error deleting subscription pending ack store",
-                                    topic, subscriptionName, exception);
-                        }
-                    }, null);
+                            @Override
+                            public void deleteLedgerFailed(ManagedLedgerException exception, Object ctx) {
+                                if (exception instanceof MetadataNotFoundException) {
+                                    asyncDeleteCursorWithClearDelayedMessage(subscriptionName, unsubscribeFuture);
+                                    return;
+                                }
+
+                                unsubscribeFuture.completeExceptionally(exception);
+                                log.error("[{}][{}] Error deleting subscription pending ack store",
+                                        topic, subscriptionName, exception);
+                            }
+                        }, null);
+            }).exceptionally(ex -> {
+                unsubscribeFuture.completeExceptionally(ex);
+                return null;
+            });
         } else {
             asyncDeleteCursorWithClearDelayedMessage(subscriptionName, unsubscribeFuture);
         }
@@ -2439,9 +2449,9 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                 }
 
                 if (Subscription.isIndividualAckMode(subscription.getType())) {
-                    if (subscription.getDispatcher() instanceof PersistentDispatcherMultipleConsumers) {
-                        PersistentDispatcherMultipleConsumers dispatcher =
-                                (PersistentDispatcherMultipleConsumers) subscription.getDispatcher();
+                    if (subscription.getDispatcher() instanceof AbstractPersistentDispatcherMultipleConsumers) {
+                        AbstractPersistentDispatcherMultipleConsumers dispatcher =
+                                (AbstractPersistentDispatcherMultipleConsumers) subscription.getDispatcher();
                         topicStatsStream.writePair("blockedSubscriptionOnUnackedMsgs",
                                 dispatcher.isBlockedDispatcherOnUnackedMsgs());
                         topicStatsStream.writePair("unackedMessages",
@@ -2748,11 +2758,11 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                     // subscription metrics
                     PersistentSubscription sub = subscriptions.get(Codec.decode(c.getName()));
                     if (sub != null) {
-                        if (sub.getDispatcher() instanceof PersistentDispatcherMultipleConsumers) {
-                            PersistentDispatcherMultipleConsumers dispatcher =
-                                (PersistentDispatcherMultipleConsumers) sub.getDispatcher();
-                            cs.subscriptionHavePendingRead = dispatcher.havePendingRead;
-                            cs.subscriptionHavePendingReplayRead = dispatcher.havePendingReplayRead;
+                        if (sub.getDispatcher() instanceof AbstractPersistentDispatcherMultipleConsumers) {
+                            AbstractPersistentDispatcherMultipleConsumers dispatcher =
+                                (AbstractPersistentDispatcherMultipleConsumers) sub.getDispatcher();
+                            cs.subscriptionHavePendingRead = dispatcher.isHavePendingRead();
+                            cs.subscriptionHavePendingReplayRead = dispatcher.isHavePendingReplayRead();
                         } else if (sub.getDispatcher() instanceof PersistentDispatcherSingleActiveConsumer) {
                             PersistentDispatcherSingleActiveConsumer dispatcher =
                                 (PersistentDispatcherSingleActiveConsumer) sub.getDispatcher();

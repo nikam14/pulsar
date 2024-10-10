@@ -70,6 +70,7 @@ import org.apache.pulsar.broker.service.Consumer;
 import org.apache.pulsar.broker.service.Dispatcher;
 import org.apache.pulsar.broker.service.EntryFilterSupport;
 import org.apache.pulsar.broker.service.GetStatsOptions;
+import org.apache.pulsar.broker.service.StickyKeyDispatcher;
 import org.apache.pulsar.broker.service.Subscription;
 import org.apache.pulsar.broker.service.Topic;
 import org.apache.pulsar.broker.service.plugin.EntryFilter;
@@ -251,7 +252,12 @@ public class PersistentSubscription extends AbstractSubscription {
                         case Shared:
                             if (dispatcher == null || dispatcher.getType() != SubType.Shared) {
                                 previousDispatcher = dispatcher;
-                                dispatcher = new PersistentDispatcherMultipleConsumers(topic, cursor, this);
+                                ServiceConfiguration config = topic.getBrokerService().getPulsar().getConfig();
+                                if (config.isSubscriptionSharedUseClassicPersistentImplementation()) {
+                                    dispatcher = new PersistentDispatcherMultipleConsumersClassic(topic, cursor, this);
+                                } else {
+                                    dispatcher = new PersistentDispatcherMultipleConsumers(topic, cursor, this);
+                                }
                             }
                             break;
                         case Failover:
@@ -272,11 +278,19 @@ public class PersistentSubscription extends AbstractSubscription {
                         case Key_Shared:
                             KeySharedMeta ksm = consumer.getKeySharedMeta();
                             if (dispatcher == null || dispatcher.getType() != SubType.Key_Shared
-                                    || !((PersistentStickyKeyDispatcherMultipleConsumers) dispatcher)
+                                    || !((StickyKeyDispatcher) dispatcher)
                                     .hasSameKeySharedPolicy(ksm)) {
                                 previousDispatcher = dispatcher;
-                                dispatcher = new PersistentStickyKeyDispatcherMultipleConsumers(topic, cursor, this,
-                                        topic.getBrokerService().getPulsar().getConfiguration(), ksm);
+                                ServiceConfiguration config = topic.getBrokerService().getPulsar().getConfig();
+                                if (config.isSubscriptionKeySharedUseClassicPersistentImplementation()) {
+                                    dispatcher =
+                                            new PersistentStickyKeyDispatcherMultipleConsumersClassic(topic, cursor,
+                                                    this,
+                                                    topic.getBrokerService().getPulsar().getConfiguration(), ksm);
+                                } else {
+                                    dispatcher = new PersistentStickyKeyDispatcherMultipleConsumers(topic, cursor, this,
+                                            topic.getBrokerService().getPulsar().getConfiguration(), ksm);
+                                }
                             }
                             break;
                         default:
@@ -1222,7 +1236,7 @@ public class PersistentSubscription extends AbstractSubscription {
         Dispatcher dispatcher = this.dispatcher;
         if (dispatcher != null) {
             Map<Consumer, List<Range>> consumerKeyHashRanges = getType() == SubType.Key_Shared
-                    ? ((PersistentStickyKeyDispatcherMultipleConsumers) dispatcher).getConsumerKeyHashRanges() : null;
+                    ? ((StickyKeyDispatcher) dispatcher).getConsumerKeyHashRanges() : null;
             dispatcher.getConsumers().forEach(consumer -> {
                 ConsumerStatsImpl consumerStats = consumer.getStats();
                 if (!getStatsOptions.isExcludeConsumers()) {
@@ -1239,11 +1253,23 @@ public class PersistentSubscription extends AbstractSubscription {
                 subStats.lastConsumedTimestamp =
                         Math.max(subStats.lastConsumedTimestamp, consumerStats.lastConsumedTimestamp);
                 subStats.lastAckedTimestamp = Math.max(subStats.lastAckedTimestamp, consumerStats.lastAckedTimestamp);
-                if (consumerKeyHashRanges != null && consumerKeyHashRanges.containsKey(consumer)) {
-                    consumerStats.keyHashRanges = consumerKeyHashRanges.get(consumer).stream()
-                            .map(Range::toString)
-                            .collect(Collectors.toList());
+                List<Range> keyRanges = consumerKeyHashRanges != null ? consumerKeyHashRanges.get(consumer) : null;
+                if (keyRanges != null) {
+                    if (((StickyKeyDispatcher) dispatcher).isClassic()) {
+                        // Use string representation for classic mode
+                        consumerStats.keyHashRanges = keyRanges.stream()
+                                .map(Range::toString)
+                                .collect(Collectors.toList());
+                    } else {
+                        // Use array representation for PIP-379 stats
+                        consumerStats.keyHashRangeArrays = keyRanges.stream()
+                                .map(range -> new int[]{range.getStart(), range.getEnd()})
+                                .collect(Collectors.toList());
+                    }
                 }
+                subStats.drainingHashesCount += consumerStats.drainingHashesCount;
+                subStats.drainingHashesClearedTotal += consumerStats.drainingHashesClearedTotal;
+                subStats.drainingHashesUnackedMessages += consumerStats.drainingHashesUnackedMessages;
             });
 
             subStats.filterProcessedMsgCount = dispatcher.getFilterProcessedMsgCount();
@@ -1261,17 +1287,18 @@ public class PersistentSubscription extends AbstractSubscription {
             }
         }
 
-        if (dispatcher instanceof PersistentDispatcherMultipleConsumers) {
+        if (dispatcher instanceof AbstractPersistentDispatcherMultipleConsumers) {
             subStats.delayedMessageIndexSizeInBytes =
-                    ((PersistentDispatcherMultipleConsumers) dispatcher).getDelayedTrackerMemoryUsage();
+                    ((AbstractPersistentDispatcherMultipleConsumers) dispatcher).getDelayedTrackerMemoryUsage();
 
             subStats.bucketDelayedIndexStats =
-                    ((PersistentDispatcherMultipleConsumers) dispatcher).getBucketDelayedIndexStats();
+                    ((AbstractPersistentDispatcherMultipleConsumers) dispatcher).getBucketDelayedIndexStats();
         }
 
         if (Subscription.isIndividualAckMode(subType)) {
-            if (dispatcher instanceof PersistentDispatcherMultipleConsumers) {
-                PersistentDispatcherMultipleConsumers d = (PersistentDispatcherMultipleConsumers) dispatcher;
+            if (dispatcher instanceof AbstractPersistentDispatcherMultipleConsumers) {
+                AbstractPersistentDispatcherMultipleConsumers d =
+                        (AbstractPersistentDispatcherMultipleConsumers) dispatcher;
                 subStats.unackedMessages = d.getTotalUnackedMessages();
                 subStats.blockedSubscriptionOnUnackedMsgs = d.isBlockedDispatcherOnUnackedMsgs();
                 subStats.msgDelayed = d.getNumberOfDelayedMessages();
@@ -1291,10 +1318,8 @@ public class PersistentSubscription extends AbstractSubscription {
         subStats.isReplicated = isReplicated();
         subStats.subscriptionProperties = subscriptionProperties;
         subStats.isDurable = cursor.isDurable();
-        if (getType() == SubType.Key_Shared && dispatcher instanceof PersistentStickyKeyDispatcherMultipleConsumers) {
-            PersistentStickyKeyDispatcherMultipleConsumers keySharedDispatcher =
-                    (PersistentStickyKeyDispatcherMultipleConsumers) dispatcher;
-
+        if (getType() == SubType.Key_Shared && dispatcher instanceof StickyKeyDispatcher) {
+            StickyKeyDispatcher keySharedDispatcher = (StickyKeyDispatcher) dispatcher;
             subStats.allowOutOfOrderDelivery = keySharedDispatcher.isAllowOutOfOrderDelivery();
             subStats.keySharedMode = keySharedDispatcher.getKeySharedMode().toString();
 
@@ -1302,25 +1327,8 @@ public class PersistentSubscription extends AbstractSubscription {
                     .getRecentlyJoinedConsumers();
             if (recentlyJoinedConsumers != null && recentlyJoinedConsumers.size() > 0) {
                 recentlyJoinedConsumers.forEach((k, v) -> {
-                    // The dispatcher allows same name consumers
-                    final StringBuilder stringBuilder = new StringBuilder();
-                    stringBuilder.append("consumerName=").append(k.consumerName())
-                            .append(", consumerId=").append(k.consumerId());
-                    if (k.cnx() != null) {
-                        stringBuilder.append(", address=").append(k.cnx().clientAddress());
-                    }
-                    subStats.consumersAfterMarkDeletePosition.put(stringBuilder.toString(), v.toString());
+                    subStats.consumersAfterMarkDeletePosition.put(k.consumerName(), v.toString());
                 });
-            }
-            final String lastSentPosition = ((PersistentStickyKeyDispatcherMultipleConsumers) dispatcher)
-                    .getLastSentPosition();
-            if (lastSentPosition != null) {
-                subStats.lastSentPosition = lastSentPosition;
-            }
-            final String individuallySentPositions = ((PersistentStickyKeyDispatcherMultipleConsumers) dispatcher)
-                    .getIndividuallySentPositions();
-            if (individuallySentPositions != null) {
-                subStats.individuallySentPositions = individuallySentPositions;
             }
         }
         subStats.nonContiguousDeletedMessagesRanges = cursor.getTotalNonContiguousDeletedMessagesRange();

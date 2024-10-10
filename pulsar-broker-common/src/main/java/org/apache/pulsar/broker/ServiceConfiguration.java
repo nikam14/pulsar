@@ -818,6 +818,22 @@ public class ServiceConfiguration implements PulsarConfiguration {
     private int subscriptionKeySharedConsistentHashingReplicaPoints = 100;
 
     @FieldContext(
+            category = CATEGORY_POLICIES,
+            doc = "For persistent Key_Shared subscriptions, enables the use of the classic implementation of the "
+                    + "Key_Shared subscription that was used before Pulsar 4.0.0 and PIP-379.",
+            dynamic = true
+    )
+    private boolean subscriptionKeySharedUseClassicPersistentImplementation = false;
+
+    @FieldContext(
+            category = CATEGORY_POLICIES,
+            doc = "For persistent Shared subscriptions, enables the use of the classic implementation of the Shared "
+                    + "subscription that was used before Pulsar 4.0.0.",
+            dynamic = true
+    )
+    private boolean subscriptionSharedUseClassicPersistentImplementation = false;
+
+    @FieldContext(
         category = CATEGORY_POLICIES,
         doc = "Set the default behavior for message deduplication in the broker.\n\n"
             + "This can be overridden per-namespace. If enabled, broker will reject"
@@ -978,6 +994,16 @@ public class ServiceConfiguration implements PulsarConfiguration {
             dynamic = true
     )
     private int keySharedLookAheadMsgInReplayThresholdPerSubscription = 20000;
+
+    @FieldContext(
+            category = CATEGORY_POLICIES,
+            doc = "For Key_Shared subscriptions, when a blocked key hash gets unblocked,"
+                    + " a redelivery will be attempted after a delay. This setting controls the delay."
+                    + " The reason to have the delay is to batch multiple unblocking events instead of triggering"
+                    + " redelivery for each unblocking event.",
+            dynamic = true
+    )
+    private long keySharedUnblockingIntervalMs = 10L;
 
     @FieldContext(
         category = CATEGORY_POLICIES,
